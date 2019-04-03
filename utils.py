@@ -22,7 +22,7 @@ def equalize_rows(edges, downsample, gauss=2):
     values = np.mgrid[:m]
     for i in range(N):
         p = s[i * (n - 1) // (N - 1)]
-        u[i] = scipy.interpolate.griddata(p, values, np.mgrid[p[0]:p[-1]:M*1j])
+        u[i][1:-1] = np.interp(np.mgrid[p[0]:p[-1]:M*1j][1:-1], p, values)
     u[:,  0] = 0
     u[:, -1] = m - 1
     return u
