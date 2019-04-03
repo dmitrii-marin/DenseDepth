@@ -1,11 +1,43 @@
 import numpy as np
+import scipy
 from PIL import Image
+
+
+def equalize_rows(edges, downsample, gauss=2):
+    edges = scipy.ndimage.filters.gaussian_filter1d(edges, gauss, 0)
+    N, M = downsample
+    s = np.cumsum(edges, axis=1)
+    n, m = edges.shape
+    u = np.zeros([N, M], np.float32)
+    values = np.mgrid[:m]
+    for i in range(N):
+        p = s[i * (n - 1) // (N - 1)]
+        u[i] = scipy.interpolate.griddata(p, values, np.mgrid[p[0]:p[-1]:M*1j])
+    u[:,  0] = 0
+    u[:, -1] = m - 1
+    return u
+
+
+def equalize(edges, downsample=None, gauss=2):
+    if downsample is None:
+        downsample = edges.shape
+    u = equalize_rows(edges, downsample, gauss)
+    v = equalize_rows(edges.T, tuple(reversed(downsample)), gauss)
+    return u, v.T
+
+
+def sampling(data, size, gauss):
+    dx, dy = scipy.gradient(data)
+    edges = np.abs(dx) + np.abs(dy)
+    return equalize(edges, size, gauss=gauss)
+
 
 def DepthNorm(x, maxDepth):
     return maxDepth / x
 
+
 def predict(model, images, minDepth=10, maxDepth=1000, batch_size=2):
-    # Support multiple RGBs, one RGB image, even grayscale 
+    # Support multiple RGBs, one RGB image, even grayscale
     if len(images.shape) < 3: images = np.stack((images,images,images), axis=2)
     if len(images.shape) < 4: images = images.reshape((1, images.shape[0], images.shape[1], images.shape[2]))
     # Compute predictions
@@ -13,16 +45,34 @@ def predict(model, images, minDepth=10, maxDepth=1000, batch_size=2):
     # Put in expected range
     return np.clip(DepthNorm(predictions, maxDepth=1000), minDepth, maxDepth) / maxDepth
 
+
 def scale_up(scale, images):
     from skimage.transform import resize
     scaled = []
-    
+
     for i in range(len(images)):
         img = images[i]
         output_shape = (scale * img.shape[0], scale * img.shape[1])
         scaled.append( resize(img, output_shape, order=1, preserve_range=True, mode='reflect', anti_aliasing=True ) )
 
     return np.stack(scaled)
+
+
+def nus_upscale(points, values=None, size=None):
+    if values is None:
+        values = points[..., :-2]
+        points = points[..., -2:]
+    if len(points.shape) > 3:
+        return np.stack((nus_upscale(p, v, size) for p, v in zip(points, values)), axis=0)
+    C = values.shape[-1]
+    points = np.reshape(points, [-1, 2])
+    values = np.reshape(values, [-1, C])
+    if size is None:
+        size = np.max(points, axis=0).astype(int) + 1
+    xi = np.reshape(np.stack(np.mgrid[:size[0], :size[1]], -1), [-1, 2])
+    inter = scipy.interpolate.griddata(points, values, xi).astype(np.float32)
+    return np.reshape(inter, tuple(size) + (C,))
+
 
 def load_images(image_files):
     loaded_images = []
@@ -35,7 +85,7 @@ def to_multichannel(i):
     if i.shape[2] == 3: return i
     i = i[:,:,0]
     return np.stack((i,i,i), axis=2)
-        
+
 def display_images(outputs, inputs=None, gt=None, is_colormap=True, is_rescale=True):
     import matplotlib.pyplot as plt
     import skimage
@@ -44,12 +94,12 @@ def display_images(outputs, inputs=None, gt=None, is_colormap=True, is_rescale=T
     plasma = plt.get_cmap('plasma')
 
     shape = (outputs[0].shape[0], outputs[0].shape[1], 3)
-    
+
     all_images = []
 
     for i in range(outputs.shape[0]):
         imgs = []
-        
+
         if isinstance(inputs, (list, tuple, np.ndarray)):
             x = to_multichannel(inputs[i])
             x = resize(x, shape, preserve_range=True, mode='reflect', anti_aliasing=True )
@@ -73,7 +123,7 @@ def display_images(outputs, inputs=None, gt=None, is_colormap=True, is_rescale=T
         all_images.append(img_set)
 
     all_images = np.stack(all_images)
-    
+
     return skimage.util.montage(all_images, multichannel=True, fill=(0,0,0))
 
 def save_images(filename, outputs, inputs=None, gt=None, is_colormap=True, is_rescale=False):
@@ -97,7 +147,7 @@ def evaluate(model, rgb, depth, crop, batch_size=6, verbose=True):
     # Error computaiton based on https://github.com/tinghuiz/SfMLearner
     def compute_errors(gt, pred):
         thresh = np.maximum((gt / pred), (pred / gt))
-        
+
         a1 = (thresh < 1.25   ).mean()
         a2 = (thresh < 1.25 ** 2).mean()
         a3 = (thresh < 1.25 ** 3).mean()
@@ -115,13 +165,13 @@ def evaluate(model, rgb, depth, crop, batch_size=6, verbose=True):
 
     bs = batch_size
 
-    for i in range(len(rgb)//bs):    
+    for i in range(len(rgb)//bs):
         x = rgb[(i)*bs:(i+1)*bs,:,:,:]
-        
+
         # Compute results
         true_y = depth[(i)*bs:(i+1)*bs,:,:]
         pred_y = scale_up(2, predict(model, x/255, minDepth=10, maxDepth=1000, batch_size=bs)[:,:,:,0]) * 10.0
-        
+
         # Test time augmentation: mirror image estimate
         pred_y_flip = scale_up(2, predict(model, x[...,::-1,:]/255, minDepth=10, maxDepth=1000, batch_size=bs)[:,:,:,0]) * 10.0
 
@@ -129,11 +179,10 @@ def evaluate(model, rgb, depth, crop, batch_size=6, verbose=True):
         true_y = true_y[:,crop[0]:crop[1]+1, crop[2]:crop[3]+1]
         pred_y = pred_y[:,crop[0]:crop[1]+1, crop[2]:crop[3]+1]
         pred_y_flip = pred_y_flip[:,crop[0]:crop[1]+1, crop[2]:crop[3]+1]
-        
         # Compute errors per image in batch
         for j in range(len(true_y)):
             errors = compute_errors(true_y[j], (0.5 * pred_y[j]) + (0.5 * np.fliplr(pred_y_flip[j])))
-            
+
             for k in range(len(errors)):
                 depth_scores[k][(i*bs)+j] = errors[k]
 

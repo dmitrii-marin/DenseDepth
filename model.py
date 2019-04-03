@@ -1,26 +1,49 @@
 import sys
 
 from keras import applications
+from keras import backend as K
 from keras.models import Model, load_model
-from keras.layers import Input, InputLayer, Conv2D, Activation, LeakyReLU, Concatenate
+from keras.layers import Input, InputLayer, Conv2D, Activation, LeakyReLU, Concatenate, Lambda
 from layers import BilinearUpSampling2D
 from loss import depth_loss_function
+import tensorflow as tf
 
-def create_model(existing='', is_twohundred=False, is_halffeatures=True):
-        
+
+def split_input(input):
+    has_locations = K.equal(K.shape(input)[-1], 5)
+    def split_locations():
+        return tuple(tf.split(input, [3, 2], -1))
+    image, aux_output = tf.cond(has_locations, split_locations, lambda: (input, tf.constant([])))
+    image.set_shape((None, None, None, 3))
+    return [image, aux_output, has_locations]
+
+
+def concat_output(args):
+    net, locations, has_locations = args
+    def append_aux_output():
+        zoomed = tf.image.resize_bilinear(net, tf.shape(locations)[1:3])
+        return tf.concat([zoomed, locations], -1)
+    return tf.cond(tf.cast(has_locations, dtype=tf.bool), append_aux_output, lambda: net)
+
+
+def create_model(existing='', is_twohundred=False, is_halffeatures=True, weights='imagenet'):
+
     if len(existing) == 0:
         print('Loading base model (DenseNet)..')
 
+        input = Input(shape=(None, None, None))
+        image, aux_output, has_locations = Lambda(split_input)(input)
+
         # Encoder Layers
         if is_twohundred:
-            base_model = applications.DenseNet201(input_shape=(None, None, 3), include_top=False)
+            base_model = applications.DenseNet201(input_tensor=image, weights=weights, include_top=False)
         else:
-            base_model = applications.DenseNet169(input_shape=(None, None, 3), include_top=False)
+            base_model = applications.DenseNet169(input_tensor=image, weights=weights, include_top=False)
 
-        print('Base model loaded.')
 
         # Starting point for decoder
         base_model_output_shape = base_model.layers[-1].output.shape
+        print('Base model loaded [output: %s].' % (base_model_output_shape,))
 
         # Layer freezing?
         for layer in base_model.layers: layer.trainable = True
@@ -53,8 +76,12 @@ def create_model(existing='', is_twohundred=False, is_halffeatures=True):
         # Extract depths (final layer)
         conv3 = Conv2D(filters=1, kernel_size=3, strides=1, padding='same', name='conv3')(decoder)
 
+        output = Lambda(concat_output)([conv3, aux_output, has_locations])
+
+        output._keras_shape = output.get_shape().as_list()
+
         # Create the model
-        model = Model(inputs=base_model.input, outputs=conv3)
+        model = Model(inputs=input, outputs=output)
     else:
         # Load model from file
         if not existing.endswith('.h5'):
@@ -64,5 +91,5 @@ def create_model(existing='', is_twohundred=False, is_halffeatures=True):
         print('\nExisting model loaded.\n')
 
     print('Model created.')
-    
+
     return model
