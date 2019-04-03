@@ -3,8 +3,18 @@ import scipy
 from PIL import Image
 
 
+def gkern(nsig=3):
+    """Returns a 2D Gaussian kernel."""
+    kernlen = nsig*4
+    kernlen += kernlen % 2
+    lim = kernlen//2 + (kernlen % 2)/2
+    x = np.linspace(-lim, lim, kernlen+1)
+    kern1d = np.exp( - x ** 2 / nsig ** 2 / 2 )
+    return kern1d/kern1d.sum()
+
+
 def equalize_rows(edges, downsample, gauss=2):
-    edges = scipy.ndimage.filters.gaussian_filter1d(edges, gauss, 0)
+    edges = scipy.signal.convolve(edges, gkern(gauss)[:,None], 'same')
     N, M = downsample
     s = np.cumsum(edges, axis=1)
     n, m = edges.shape
