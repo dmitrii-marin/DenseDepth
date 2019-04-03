@@ -128,11 +128,11 @@ class NYU_BasicRGBSequence(Sequence):
 
             # adjust sizes
             if self.nus is not None:
-                u, v = sampling(y, self.shape_rgb[1:3], self.nus)
+                u, v = sampling(y[:,:,0], self.shape_rgb[1:3], self.nus)
                 locations = [v, u]
                 x = x[v.astype(int), u.astype(int), :]
                 if not self.locations:
-                    u, v = sampling(y, self.shape_depth[1:3], self.nus)
+                    u, v = sampling(y[:, :, 0], self.shape_depth[1:3], self.nus)
                     y = y[v.astype(int), u.astype(int), :]
             else:
                 shape = x.shape
